@@ -102,17 +102,19 @@ class ESNPyTorch(nn.Module):
         
         self.Win = torch.tensor(Win_np, dtype=self.dtype, device=device)
         
-        # 初始化偏置 - 使用bernoulli分布（与ReservoirPy一致）
-        # ReservoirPy默认: bias = bernoulli (±1, p=0.5)
-        # 关键修正：bias需要应用input_connectivity，这是ReservoirPy的行为！
+        # 初始化偏置 - 完全按照ReservoirPy源码logic
+        # ReservoirPy源码：bias_init(units, 1, input_scaling=bias_scaling, connectivity=input_connectivity)
+        # 注意：ReservoirPy使用bias_scaling作为input_scaling参数传递给bias_init
+        bias_scaling = 1.0  # ReservoirPy默认值
+        
+        # 生成bernoulli分布的bias
         bias_full = self._bernoulli_matrix(self.reservoir_size, 1, p=0.5)
         
-        # 应用input_connectivity到bias（这是ReservoirPy的默认行为）
+        # 应用input_connectivity稀疏化（ReservoirPy源码行为）
         mask_bias = np.random.rand(self.reservoir_size, 1) < self.input_connectivity
         bias_np = bias_full * mask_bias
         
-        # 应用bias_scaling（ReservoirPy默认为1.0）
-        bias_scaling = 1.0  # ReservoirPy默认值
+        # 应用bias_scaling（作为ReservoirPy的input_scaling参数）
         bias_np = bias_np * bias_scaling
         
         self.bias = torch.tensor(bias_np, dtype=self.dtype, device=device)
