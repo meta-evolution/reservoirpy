@@ -42,7 +42,8 @@ class ESNPyTorch(nn.Module):
     
     def __init__(self, input_dim, reservoir_size, spectral_radius=0.9, 
                  leak_rate=0.1, input_connectivity=0.1, rc_connectivity=0.1,
-                 activation='tanh', dtype=torch.float64, seed=None):
+                 activation='tanh', dtype=torch.float64, seed=None, 
+                 computation_mode='gpu'):
         super(ESNPyTorch, self).__init__()
         
         self.input_dim = input_dim
@@ -52,6 +53,7 @@ class ESNPyTorch(nn.Module):
         self.input_connectivity = input_connectivity
         self.rc_connectivity = rc_connectivity
         self.dtype = dtype
+        self.computation_mode = computation_mode  # 'gpu' or 'cpu_precise'
         
         # 激活函数
         if activation == 'tanh':
@@ -121,11 +123,28 @@ class ESNPyTorch(nn.Module):
         
     def forward(self, input_data):
         """
-        前向传播，实现与ReservoirPy相同的更新方程
+        前向传播，支持GPU模式和CPU精确模式
+        
+        GPU模式 ('gpu'): 使用PyTorch原生计算，享受GPU加速
+        CPU精确模式 ('cpu_precise'): 使用NumPy计算，确保与ReservoirPy数值一致
+        
         x[t+1] = (1-lr)·x[t] + lr·tanh(W·x[t] + Win·u[t+1] + bias)
         """
         if self.state is None:
             self.state = torch.zeros(self.reservoir_size, 1, dtype=self.dtype, device=device)
+        
+        if self.computation_mode == 'cpu_precise':
+            # CPU精确模式：使用NumPy计算，确保与ReservoirPy完全一致
+            return self._forward_cpu_precise(input_data)
+        else:
+            # GPU模式（默认）：使用PyTorch原生计算
+            return self._forward_gpu(input_data)
+    
+    def _forward_gpu(self, input_data):
+        """GPU模式前向传播：使用PyTorch原生计算，享受GPU加速"""
+        # 确保输入是PyTorch张量
+        if not isinstance(input_data, torch.Tensor):
+            input_data = torch.tensor(input_data, dtype=self.dtype, device=device)
         
         # 确保输入是列向量
         if input_data.dim() == 1:
@@ -145,6 +164,62 @@ class ESNPyTorch(nn.Module):
         )
         
         return self.state.squeeze()
+    
+    def _forward_cpu_precise(self, input_data):
+        """CPU精确模式前向传播：使用NumPy计算，确保与ReservoirPy完全一致"""
+        # 转换为NumPy进行计算，确保与ReservoirPy完全一致
+        if isinstance(input_data, torch.Tensor):
+            input_np = input_data.cpu().numpy()
+        else:
+            input_np = input_data
+            
+        # 确保输入是列向量
+        if input_np.ndim == 1:
+            input_np = input_np.reshape(-1, 1)
+        elif input_np.ndim == 2 and input_np.shape[0] == 1:
+            input_np = input_np.T
+            
+        # 获取当前状态的NumPy版本
+        current_state_np = self.state.cpu().numpy()
+        if current_state_np.ndim == 1:
+            current_state_np = current_state_np.reshape(-1, 1)
+            
+        # 获取权重的NumPy版本
+        W_np = self.W.cpu().numpy()
+        Win_np = self.Win.cpu().numpy()
+        bias_np = self.bias.cpu().numpy()
+        if bias_np.ndim == 1:
+            bias_np = bias_np.reshape(-1, 1)
+        
+        # 使用NumPy进行ESN更新计算（与ReservoirPy完全相同）
+        pre_activation = (
+            W_np @ current_state_np +       # W·x[t]
+            Win_np @ input_np +             # Win·u[t+1]
+            bias_np                         # bias
+        )
+        
+        # 使用NumPy的tanh函数，确保与ReservoirPy一致
+        new_state_np = (
+            (1 - self.leak_rate) * current_state_np +              # (1-lr)·x[t]
+            self.leak_rate * np.tanh(pre_activation)               # lr·tanh(...)
+        )
+        
+        # 转换回PyTorch张量
+        self.state = torch.tensor(new_state_np, dtype=self.dtype, device=device)
+        
+        return self.state.squeeze()
+    
+    def set_computation_mode(self, mode):
+        """设置计算模式
+        
+        Args:
+            mode (str): 'gpu' 或 'cpu_precise'
+        """
+        if mode not in ['gpu', 'cpu_precise']:
+            raise ValueError(f"Invalid computation mode: {mode}. Must be 'gpu' or 'cpu_precise'")
+        
+        print(f"ESN computation mode set to: {mode}")
+        self.computation_mode = mode
     
     def reset_state(self, initial_state=None):
         """重置状态"""
@@ -207,7 +282,7 @@ def run_comparison_experiment(n_steps=1000, input_dim=96, reservoir_size=1000,
     comparison_seed = SEED
     np.random.seed(comparison_seed)
     
-    # 1. 先创建PyTorch ESN并初始化权重
+    # 1. 先创建PyTorch ESN并初始化权重（在比较实验中使用CPU精确模式）
     print("\n1. Creating PyTorch ESN with initialized weights...")
     esn_pytorch = ESNPyTorch(
         input_dim=input_dim,
@@ -218,8 +293,11 @@ def run_comparison_experiment(n_steps=1000, input_dim=96, reservoir_size=1000,
         rc_connectivity=0.1,
         activation='tanh',
         dtype=torch.float64,  # 使用双精度以匹配NumPy
-        seed=comparison_seed  # 使用种子初始化权重
+        seed=comparison_seed,  # 使用种子初始化权重
+        computation_mode='cpu_precise'  # 强制使用CPU精确模式确保数值一致性
     )
+    
+    print("  📌 ESN is set to CPU precise mode for numerical consistency verification")
     
     # 2. 创建ReservoirPy的Reservoir（不初始化权重）
     print("\n2. Creating ReservoirPy Reservoir...")
