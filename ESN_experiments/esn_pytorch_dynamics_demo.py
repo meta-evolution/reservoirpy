@@ -92,15 +92,29 @@ class ESNPyTorch(nn.Module):
         # ReservoirPy默认: Win = bernoulli (±1, p=0.5)
         Win_np = self._bernoulli_matrix(self.reservoir_size, self.input_dim, p=0.5)
         
-        # 应用输入连接性
+        # 应用输入连接性（稀疏化）
         mask_in = np.random.rand(self.reservoir_size, self.input_dim) < self.input_connectivity
         Win_np = Win_np * mask_in
+        
+        # 应用input_scaling（ReservoirPy默认为1.0，但为了完全兼容还是要应用）
+        input_scaling = 1.0  # ReservoirPy默认值
+        Win_np = Win_np * input_scaling
         
         self.Win = torch.tensor(Win_np, dtype=self.dtype, device=device)
         
         # 初始化偏置 - 使用bernoulli分布（与ReservoirPy一致）
         # ReservoirPy默认: bias = bernoulli (±1, p=0.5)
-        bias_np = self._bernoulli_matrix(self.reservoir_size, 1, p=0.5)
+        # 关键修正：bias需要应用input_connectivity，这是ReservoirPy的行为！
+        bias_full = self._bernoulli_matrix(self.reservoir_size, 1, p=0.5)
+        
+        # 应用input_connectivity到bias（这是ReservoirPy的默认行为）
+        mask_bias = np.random.rand(self.reservoir_size, 1) < self.input_connectivity
+        bias_np = bias_full * mask_bias
+        
+        # 应用bias_scaling（ReservoirPy默认为1.0）
+        bias_scaling = 1.0  # ReservoirPy默认值
+        bias_np = bias_np * bias_scaling
+        
         self.bias = torch.tensor(bias_np, dtype=self.dtype, device=device)
         
         print(f"  W shape: {self.W.shape}, spectral radius: {self.spectral_radius}")
