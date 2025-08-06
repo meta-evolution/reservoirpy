@@ -62,15 +62,18 @@ class ESNPyTorch(nn.Module):
             self.bias = None
             
     def _initialize_weights(self, seed):
-        """初始化权重矩阵，与ReservoirPy的初始化方式一致"""
+        """初始化权重矩阵，完全按照ReservoirPy源代码的方式"""
         # 设置随机种子
         np.random.seed(seed)
         torch.manual_seed(seed)
         
         print(f"Initializing ESNPyTorch weights (seed={seed})...")
+        print(f"  Using ReservoirPy-compatible initialization:")
+        print(f"    W: normal distribution (loc=0, scale=1)")
+        print(f"    Win: bernoulli distribution (p=0.5, values=±1)")
+        print(f"    bias: bernoulli distribution (p=0.5, values=±1)")
         
-        # 初始化递归权重矩阵 W
-        # 创建稀疏随机矩阵
+        # 初始化递归权重矩阵 W - 使用normal分布（与ReservoirPy一致）
         W_np = np.random.randn(self.reservoir_size, self.reservoir_size)
         
         # 应用连接性（稀疏化）
@@ -85,8 +88,9 @@ class ESNPyTorch(nn.Module):
         
         self.W = torch.tensor(W_np, dtype=self.dtype, device=device)
         
-        # 初始化输入权重矩阵 Win
-        Win_np = np.random.randn(self.reservoir_size, self.input_dim)
+        # 初始化输入权重矩阵 Win - 使用bernoulli分布（与ReservoirPy一致）
+        # ReservoirPy默认: Win = bernoulli (±1, p=0.5)
+        Win_np = self._bernoulli_matrix(self.reservoir_size, self.input_dim, p=0.5)
         
         # 应用输入连接性
         mask_in = np.random.rand(self.reservoir_size, self.input_dim) < self.input_connectivity
@@ -94,14 +98,38 @@ class ESNPyTorch(nn.Module):
         
         self.Win = torch.tensor(Win_np, dtype=self.dtype, device=device)
         
-        # 初始化偏置
-        bias_np = np.random.uniform(-1, 1, (self.reservoir_size, 1))
+        # 初始化偏置 - 使用bernoulli分布（与ReservoirPy一致）
+        # ReservoirPy默认: bias = bernoulli (±1, p=0.5)
+        bias_np = self._bernoulli_matrix(self.reservoir_size, 1, p=0.5)
         self.bias = torch.tensor(bias_np, dtype=self.dtype, device=device)
         
         print(f"  W shape: {self.W.shape}, spectral radius: {self.spectral_radius}")
         print(f"  Win shape: {self.Win.shape}, input connectivity: {self.input_connectivity}")
         print(f"  bias shape: {self.bias.shape}")
         print(f"  Computation mode: {self.computation_mode}")
+        
+    def _bernoulli_matrix(self, rows, cols, p=0.5, value=1.0):
+        """
+        生成伯努利分布矩阵，完全按照ReservoirPy的custom_bernoulli实现
+        
+        Parameters:
+        -----------
+        rows, cols : int
+            矩阵形状
+        p : float, default 0.5
+            获得+value的概率，获得-value的概率为(1-p)
+        value : float, default 1.0
+            成功值，失败值为-value
+        
+        Returns:
+        --------
+        numpy.ndarray
+            伯努利分布矩阵，值为+value或-value
+        """
+        # 这里完全按照ReservoirPy源码中的_bernoulli_discrete_rvs实现
+        size = rows * cols
+        choices = np.random.choice([value, -value], size=size, p=[p, 1-p])
+        return choices.reshape(rows, cols)
         
     def forward(self, input_data):
         """
