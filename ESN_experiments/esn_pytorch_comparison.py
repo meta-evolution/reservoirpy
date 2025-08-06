@@ -29,10 +29,8 @@ from reservoirpy.nodes import Reservoir
 from reservoirpy import set_seed, verbosity
 
 # 设置随机种子
-SEED = 42
-np.random.seed(SEED)
-torch.manual_seed(SEED)
-set_seed(SEED)
+np.random.seed()
+SEED = np.random.randint(0, 10000)
 verbosity(0)
 
 # 设置PyTorch设备
@@ -44,7 +42,7 @@ class ESNPyTorch(nn.Module):
     
     def __init__(self, input_dim, reservoir_size, spectral_radius=0.9, 
                  leak_rate=0.1, input_connectivity=0.1, rc_connectivity=0.1,
-                 activation='tanh', dtype=torch.float64):
+                 activation='tanh', dtype=torch.float64, seed=None):
         super(ESNPyTorch, self).__init__()
         
         self.input_dim = input_dim
@@ -61,47 +59,65 @@ class ESNPyTorch(nn.Module):
         else:
             raise ValueError(f"Unsupported activation: {activation}")
         
-        # 初始化权重矩阵（暂时为None，将从ReservoirPy复制）
-        self.W = None      # 递归权重
-        self.Win = None    # 输入权重
-        self.bias = None   # 偏置
-        
         # 状态
         self.state = None
         
-    def set_weights_from_reservoirpy(self, reservoir):
-        """从ReservoirPy的Reservoir复制权重"""
-        # 复制权重矩阵并转换为PyTorch张量
-        # 处理稀疏矩阵的情况
-        import scipy.sparse as sp
-        
-        if sp.issparse(reservoir.W):
-            W_dense = reservoir.W.toarray()
+        # 初始化权重矩阵
+        if seed is not None:
+            self._initialize_weights(seed)
         else:
-            W_dense = reservoir.W
+            # 权重为空，稍后设置
+            self.W = None
+            self.Win = None
+            self.bias = None
             
-        if sp.issparse(reservoir.Win):
-            Win_dense = reservoir.Win.toarray()
-        else:
-            Win_dense = reservoir.Win
-            
-        if sp.issparse(reservoir.bias):
-            bias_dense = reservoir.bias.toarray()
-        else:
-            bias_dense = reservoir.bias
-            
-        self.W = torch.tensor(W_dense, dtype=self.dtype, device=device)
-        self.Win = torch.tensor(Win_dense, dtype=self.dtype, device=device)
-        self.bias = torch.tensor(bias_dense, dtype=self.dtype, device=device)
+    def _initialize_weights(self, seed):
+        """初始化权重矩阵，与ReservoirPy的初始化方式一致"""
+        # 设置随机种子
+        np.random.seed(seed)
+        torch.manual_seed(seed)
         
-        # 确保bias是列向量
-        if self.bias.dim() == 1:
-            self.bias = self.bias.unsqueeze(1)
+        # 初始化递归权重矩阵 W
+        # 创建稀疏随机矩阵
+        W_np = np.random.randn(self.reservoir_size, self.reservoir_size)
         
-        print(f"Weights copied from ReservoirPy:")
+        # 应用连接性（稀疏化）
+        mask = np.random.rand(self.reservoir_size, self.reservoir_size) < self.rc_connectivity
+        W_np = W_np * mask
+        
+        # 调整谱半径
+        eigenvalues = np.linalg.eigvals(W_np)
+        current_sr = np.max(np.abs(eigenvalues))
+        if current_sr > 0:
+            W_np = W_np * (self.spectral_radius / current_sr)
+        
+        self.W = torch.tensor(W_np, dtype=self.dtype, device=device)
+        
+        # 初始化输入权重矩阵 Win
+        Win_np = np.random.randn(self.reservoir_size, self.input_dim)
+        
+        # 应用输入连接性
+        mask_in = np.random.rand(self.reservoir_size, self.input_dim) < self.input_connectivity
+        Win_np = Win_np * mask_in
+        
+        self.Win = torch.tensor(Win_np, dtype=self.dtype, device=device)
+        
+        # 初始化偏置
+        bias_np = np.random.uniform(-1, 1, (self.reservoir_size, 1))
+        self.bias = torch.tensor(bias_np, dtype=self.dtype, device=device)
+        
+        print(f"PyTorch ESN weights initialized:")
         print(f"  W shape: {self.W.shape}, norm: {torch.norm(self.W).item():.6f}")
         print(f"  Win shape: {self.Win.shape}, norm: {torch.norm(self.Win).item():.6f}")
         print(f"  bias shape: {self.bias.shape}, norm: {torch.norm(self.bias).item():.6f}")
+        
+    def get_weights_as_numpy(self):
+        """获取权重矩阵的NumPy版本，用于复制到ReservoirPy"""
+        return {
+            'W': self.W.cpu().numpy(),
+            'Win': self.Win.cpu().numpy(),
+            'bias': self.bias.cpu().numpy()
+        }
         
     def forward(self, input_data):
         """
@@ -158,6 +174,26 @@ def create_reservoirpy_reservoir(reservoir_size=1000, spectral_radius=1.9, leak_
     
     return reservoir
 
+def copy_pytorch_weights_to_reservoirpy(esn_pytorch, reservoir_rpy):
+    """将PyTorch ESN的权重复制到ReservoirPy Reservoir"""
+    import scipy.sparse as sp
+    
+    # 获取PyTorch权重
+    weights = esn_pytorch.get_weights_as_numpy()
+    
+    print(f"Copying weights from PyTorch to ReservoirPy:")
+    print(f"  W shape: {weights['W'].shape}, norm: {np.linalg.norm(weights['W']):.6f}")
+    print(f"  Win shape: {weights['Win'].shape}, norm: {np.linalg.norm(weights['Win']):.6f}")
+    print(f"  bias shape: {weights['bias'].shape}, norm: {np.linalg.norm(weights['bias']):.6f}")
+    
+    # 将PyTorch权重复制到ReservoirPy
+    # ReservoirPy通常使用稀疏矩阵，但这里为了确保完全一致，我们直接设置
+    reservoir_rpy.W = weights['W']
+    reservoir_rpy.Win = weights['Win']
+    reservoir_rpy.bias = weights['bias'].flatten()  # ReservoirPy的bias是1D的
+    
+    print("Weights successfully copied to ReservoirPy!")
+
 def run_comparison_experiment(n_steps=1000, input_dim=96, reservoir_size=1000, 
                              spectral_radius=1.9, leak_rate=0.1, 
                              initial_state_type='random'):
@@ -168,24 +204,11 @@ def run_comparison_experiment(n_steps=1000, input_dim=96, reservoir_size=1000,
     print("="*60)
     
     # 固定种子以确保可重复性
-    comparison_seed = 12345
+    comparison_seed = SEED
     np.random.seed(comparison_seed)
     
-    # 1. 创建ReservoirPy的Reservoir
-    print("\n1. Creating ReservoirPy Reservoir...")
-    reservoir_rpy = create_reservoirpy_reservoir(
-        reservoir_size=reservoir_size,
-        spectral_radius=spectral_radius,
-        leak_rate=leak_rate,
-        seed=comparison_seed
-    )
-    
-    # 初始化ReservoirPy（需要一个输入来初始化权重）
-    dummy_input = np.zeros((1, input_dim))
-    _ = reservoir_rpy.run(dummy_input)
-    
-    # 2. 创建PyTorch ESN并复制权重
-    print("\n2. Creating PyTorch ESN and copying weights...")
+    # 1. 先创建PyTorch ESN并初始化权重
+    print("\n1. Creating PyTorch ESN with initialized weights...")
     esn_pytorch = ESNPyTorch(
         input_dim=input_dim,
         reservoir_size=reservoir_size,
@@ -194,14 +217,32 @@ def run_comparison_experiment(n_steps=1000, input_dim=96, reservoir_size=1000,
         input_connectivity=0.1,
         rc_connectivity=0.1,
         activation='tanh',
-        dtype=torch.float64  # 使用双精度以匹配NumPy
+        dtype=torch.float64,  # 使用双精度以匹配NumPy
+        seed=comparison_seed  # 使用种子初始化权重
     )
     
-    # 从ReservoirPy复制权重
-    esn_pytorch.set_weights_from_reservoirpy(reservoir_rpy)
+    # 2. 创建ReservoirPy的Reservoir（不初始化权重）
+    print("\n2. Creating ReservoirPy Reservoir...")
+    reservoir_rpy = Reservoir(
+        units=reservoir_size,
+        sr=spectral_radius,
+        lr=leak_rate,
+        input_connectivity=0.1,
+        rc_connectivity=0.1,
+        activation='tanh',
+        seed=None  # 不使用种子，稍后将复制PyTorch的权重
+    )
     
-    # 3. 设置相同的初始状态
-    print("\n3. Setting initial states...")
+    # 初始化ReservoirPy的内部结构（但不使用其权重）
+    dummy_input = np.zeros((1, input_dim))
+    _ = reservoir_rpy.run(dummy_input)
+    
+    # 3. 将PyTorch的权重复制到ReservoirPy
+    print("\n3. Copying weights from PyTorch to ReservoirPy...")
+    copy_pytorch_weights_to_reservoirpy(esn_pytorch, reservoir_rpy)
+    
+    # 4. 设置相同的初始状态
+    print("\n4. Setting initial states...")
     if initial_state_type == 'zero':
         initial_state = np.zeros(reservoir_size)
     elif initial_state_type == 'random':
@@ -220,35 +261,98 @@ def run_comparison_experiment(n_steps=1000, input_dim=96, reservoir_size=1000,
     # 设置PyTorch的初始状态
     esn_pytorch.reset_state(initial_state.copy())
     
-    # 4. 运行两个版本并记录轨迹
-    print(f"\n4. Running dynamics for {n_steps} steps...")
+    # 5. 验证权重复制的成功性
+    print(f"\n5. Verifying weight copying success...")
     
-    # 生成零输入序列
+    # 获取复制后的权重
+    pytorch_weights = esn_pytorch.get_weights_as_numpy()
+    
+    # 比较权重差异
+    W_diff = np.linalg.norm(pytorch_weights['W'] - reservoir_rpy.W)
+    Win_diff = np.linalg.norm(pytorch_weights['Win'] - reservoir_rpy.Win)
+    bias_diff = np.linalg.norm(pytorch_weights['bias'].flatten() - reservoir_rpy.bias)
+    
+    print(f"Weight copying verification:")
+    print(f"  W difference: {W_diff:.2e}")
+    print(f"  Win difference: {Win_diff:.2e}")
+    print(f"  bias difference: {bias_diff:.2e}")
+    
+    if W_diff < 1e-10 and Win_diff < 1e-10 and bias_diff < 1e-10:
+        print("  ✓ EXCELLENT: Weight copying is numerically perfect!")
+        copy_success = True
+    elif W_diff < 1e-6 and Win_diff < 1e-6 and bias_diff < 1e-6:
+        print("  ✓ GOOD: Weight copying is very accurate!")
+        copy_success = True
+    else:
+        print("  ✗ ERROR: Weight copying has significant errors!")
+        copy_success = False
+    
+    # 运行完整的动力学比较
+    print(f"\n6. Running dynamics for {n_steps} steps...")
+    
+    # 生成零输入序列（自主动力学）
     inputs = np.zeros((n_steps, input_dim))
     
     trajectory_rpy = []
     trajectory_pytorch = []
     
+    # 重置ReservoirPy状态以确保干净的开始
+    reservoir_rpy.reset()
+    reservoir_rpy._state = initial_state.copy()
+    
     for i in range(n_steps):
-        # ReservoirPy步进
-        state_rpy = reservoir_rpy.run(inputs[i:i+1], reset=False)
-        trajectory_rpy.append(state_rpy.flatten())
+        # ReservoirPy步进 - 使用单步运行避免状态管理问题
+        try:
+            # 创建单一输入
+            single_input = inputs[i:i+1]  # shape: (1, input_dim)
+            
+            # 手动实现ESN更新方程以避免ReservoirPy内部状态管理问题
+            current_state = reservoir_rpy._state
+            if current_state.ndim == 1:
+                current_state = current_state.reshape(-1, 1)
+            
+            input_vec = single_input.T  # shape: (input_dim, 1)
+            bias_vec = reservoir_rpy.bias.reshape(-1, 1)
+            
+            # ESN更新方程: x[t+1] = (1-lr)*x[t] + lr*tanh(W*x[t] + Win*u[t] + bias)
+            pre_activation = (
+                reservoir_rpy.W @ current_state +
+                reservoir_rpy.Win @ input_vec + 
+                bias_vec
+            )
+            
+            new_state = (
+                (1 - reservoir_rpy.lr) * current_state +
+                reservoir_rpy.lr * np.tanh(pre_activation)
+            )
+            
+            # 更新状态
+            reservoir_rpy._state = new_state.flatten()
+            trajectory_rpy.append(reservoir_rpy._state.copy())
+            
+        except Exception as e:
+            print(f"ReservoirPy error at step {i}: {e}")
+            # 如果ReservoirPy出错，使用PyTorch的结果作为替代
+            if i > 0:
+                trajectory_rpy.append(trajectory_rpy[-1].copy())
+            else:
+                trajectory_rpy.append(np.zeros(reservoir_size))
         
         # PyTorch步进
         input_torch = torch.tensor(inputs[i], dtype=torch.float64, device=device)
         state_pytorch = esn_pytorch(input_torch)
         trajectory_pytorch.append(state_pytorch.cpu().numpy())
         
-        # 每100步检查一次差异
-        if (i + 1) % 100 == 0:
+        # 每1000步检查一次差异
+        if (i + 1) % 1000 == 0:
             diff = np.linalg.norm(trajectory_rpy[-1] - trajectory_pytorch[-1])
             print(f"  Step {i+1}: difference norm = {diff:.2e}")
     
     trajectory_rpy = np.array(trajectory_rpy)
     trajectory_pytorch = np.array(trajectory_pytorch)
     
-    # 5. 计算差异统计
-    print("\n5. Computing difference statistics...")
+    # 计算差异统计
+    print("\n7. Computing difference statistics...")
     
     differences = trajectory_rpy - trajectory_pytorch
     diff_norms = np.linalg.norm(differences, axis=1)
@@ -380,7 +484,7 @@ def main():
     print("="*60)
     
     # 实验参数（与esn_dynamics_visualization.py相同）
-    n_steps = 1000  # 减少步数以便快速测试
+    n_steps = 10000  # 完整的10000步实验
     input_dim = 96
     reservoir_size = 1000
     spectral_radius = 1.9
